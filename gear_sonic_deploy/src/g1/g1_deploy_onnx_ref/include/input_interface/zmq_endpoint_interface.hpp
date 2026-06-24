@@ -607,6 +607,79 @@ private:
         int protocol_version = 0;                  ///< Protocol version from the message (1, 2, or 3).
         std::vector<double> token_data;            ///< Token data from the message.
     };
+
+    bool DecodeHandField(
+        const ZMQPackedMessageSubscriber::FieldInfo& field,
+        const std::vector<uint8_t>& buffer,
+        int expected_dof,
+        bool needs_swap,
+        const std::string& field_name,
+        std::vector<double>& out_values) const {
+        bool shape_ok = false;
+        if (field.shape.size() == 1 && static_cast<int>(field.shape[0]) == expected_dof) {
+            shape_ok = true;
+        } else if (field.shape.size() == 2 && static_cast<int>(field.shape[1]) == expected_dof) {
+            shape_ok = true;
+        }
+
+        if (!shape_ok) {
+            std::cerr << "[ZMQEndpointInterface] Invalid " << field_name
+                      << " shape for " << expected_dof << "-DOF hand action" << std::endl;
+            return false;
+        }
+
+        out_values.assign(static_cast<size_t>(expected_dof), 0.0);
+        if (field.dtype == "f32") {
+            for (int j = 0; j < expected_dof; ++j) {
+                float value;
+                std::memcpy(&value, buffer.data() + static_cast<size_t>(j) * sizeof(float), sizeof(float));
+                if (needs_swap) {
+                    value = byte_swap(value);
+                }
+                out_values[static_cast<size_t>(j)] = static_cast<double>(value);
+            }
+            return true;
+        }
+
+        if (field.dtype == "f64") {
+            for (int j = 0; j < expected_dof; ++j) {
+                double value;
+                std::memcpy(&value, buffer.data() + static_cast<size_t>(j) * sizeof(double), sizeof(double));
+                if (needs_swap) {
+                    value = byte_swap(value);
+                }
+                out_values[static_cast<size_t>(j)] = value;
+            }
+            return true;
+        }
+
+        std::cerr << "[ZMQEndpointInterface] Unsupported dtype '" << field.dtype
+                  << "' for " << field_name << std::endl;
+        return false;
+    }
+
+    void StoreHandAction(bool is_left, const std::vector<double>& values) {
+        if (values.empty()) {
+            return;
+        }
+
+        has_hand_joints_ = true;
+        if (is_left) {
+            left_hand_action_.SetData(values);
+            if (values.size() == 7) {
+                std::array<double, 7> legacy = {};
+                std::copy(values.begin(), values.end(), legacy.begin());
+                left_hand_joint_.SetData(legacy);
+            }
+        } else {
+            right_hand_action_.SetData(values);
+            if (values.size() == 7) {
+                std::array<double, 7> legacy = {};
+                std::copy(values.begin(), values.end(), legacy.begin());
+                right_hand_joint_.SetData(legacy);
+            }
+        }
+    }
     
     /**
      * @brief Decode buffered network data into a new MotionSequence.
@@ -647,7 +720,8 @@ private:
         
         // Find expected fields by name (including frame_index for alignment)
         int joint_pos_idx = -1, joint_vel_idx = -1, body_quat_idx = -1, frame_index_idx = -1, smpl_joints_idx = -1, smpl_pose_idx = -1;
-        int left_hand_joints_idx = -1, right_hand_joints_idx = -1, catch_up_idx = -1;
+        int left_hand_joints_idx = -1, right_hand_joints_idx = -1;
+        int left_hand_action_idx = -1, right_hand_action_idx = -1, catch_up_idx = -1;
         int token_state_idx = -1;  // Protocol v4: token-only streaming
         int heading_increment_idx = -1;
         int timestamp_monotonic_idx = -1;
@@ -664,6 +738,8 @@ private:
             else if (f.name == "smpl_pose") smpl_pose_idx = static_cast<int>(i);
             else if (f.name == "left_hand_joints") left_hand_joints_idx = static_cast<int>(i);
             else if (f.name == "right_hand_joints") right_hand_joints_idx = static_cast<int>(i);
+            else if (f.name == "left_hand_action") left_hand_action_idx = static_cast<int>(i);
+            else if (f.name == "right_hand_action") right_hand_action_idx = static_cast<int>(i);
             else if (f.name == "catch_up") catch_up_idx = static_cast<int>(i);
             else if (f.name == "token_state") token_state_idx = static_cast<int>(i);
             else if (f.name == "heading_increment") heading_increment_idx = static_cast<int>(i);
@@ -759,108 +835,55 @@ private:
             // Store tokens in the external token state buffer (inherited from InputInterface)
             result.token_data = std::move(token_data);
             
-            // Decode hand joint positions if present (7 DOF joint values) - same as protocol v2/v3
-            bool has_left_hand_joints = (left_hand_joints_idx >= 0);
-            bool has_right_hand_joints = (right_hand_joints_idx >= 0);
-            auto [has_left_hand_v4, left_hand_joint_values] = GetHandPose(true);
-            auto [has_right_hand_v4, right_hand_joint_values] = GetHandPose(false);
-            
-            if (has_left_hand_joints) {
-                const auto& left_hand_field = buffered_header_.fields[left_hand_joints_idx];
-                const auto& left_hand_buf = buffered_buffers_[left_hand_joints_idx];
-                
-                // Validate shape: expect [7] or [N, 7] (for chunks, use first frame)
-                int num_hand_joints = 0;
-                if (left_hand_field.shape.size() == 1 && left_hand_field.shape[0] == 7) {
-                    num_hand_joints = 7;
-                } else if (left_hand_field.shape.size() == 2 && left_hand_field.shape[1] == 7) {
-                    num_hand_joints = 7;
-                }
-                
-                if (num_hand_joints == 7) {
-                    // Decode 7 joint values (from first frame if chunked [N, 7])
-                    if (left_hand_field.dtype == "f32") {
-                        for (int j = 0; j < 7; ++j) {
-                            float val;
-                            std::memcpy(&val, left_hand_buf.data() + j * sizeof(float), sizeof(float));
-                            if (needs_swap) val = byte_swap(val);
-                            left_hand_joint_values[j] = static_cast<double>(val);
-                        }
-                    } else if (left_hand_field.dtype == "f64") {
-                        for (int j = 0; j < 7; ++j) {
-                            double val;
-                            std::memcpy(&val, left_hand_buf.data() + j * sizeof(double), sizeof(double));
-                            if (needs_swap) val = byte_swap(val);
-                            left_hand_joint_values[j] = val;
-                        }
-                    }
-                } else {
-                    std::cerr << "[ZMQEndpointInterface] Protocol v4: Invalid left_hand_joints shape" << std::endl;
-                    has_left_hand_joints = false;
+            if (left_hand_joints_idx >= 0) {
+                std::vector<double> left_values;
+                if (DecodeHandField(
+                        buffered_header_.fields[static_cast<size_t>(left_hand_joints_idx)],
+                        buffered_buffers_[static_cast<size_t>(left_hand_joints_idx)],
+                        7,
+                        needs_swap,
+                        "left_hand_joints",
+                        left_values)) {
+                    StoreHandAction(true, left_values);
                 }
             }
-            
-            if (has_right_hand_joints) {
-                const auto& right_hand_field = buffered_header_.fields[right_hand_joints_idx];
-                const auto& right_hand_buf = buffered_buffers_[right_hand_joints_idx];
-                
-                // Validate shape: expect [7] or [N, 7] (for chunks, use first frame)
-                int num_hand_joints = 0;
-                if (right_hand_field.shape.size() == 1 && right_hand_field.shape[0] == 7) {
-                    num_hand_joints = 7;
-                } else if (right_hand_field.shape.size() == 2 && right_hand_field.shape[1] == 7) {
-                    num_hand_joints = 7;
-                }
-                
-                if (num_hand_joints == 7) {
-                    // Decode 7 joint values (from first frame if chunked [N, 7])
-                    if (right_hand_field.dtype == "f32") {
-                        for (int j = 0; j < 7; ++j) {
-                            float val;
-                            std::memcpy(&val, right_hand_buf.data() + j * sizeof(float), sizeof(float));
-                            if (needs_swap) val = byte_swap(val);
-                            right_hand_joint_values[j] = static_cast<double>(val);
-                        }
-                    } else if (right_hand_field.dtype == "f64") {
-                        for (int j = 0; j < 7; ++j) {
-                            double val;
-                            std::memcpy(&val, right_hand_buf.data() + j * sizeof(double), sizeof(double));
-                            if (needs_swap) val = byte_swap(val);
-                            right_hand_joint_values[j] = val;
-                        }
-                    }
-                } else {
-                    std::cerr << "[ZMQEndpointInterface] Protocol v4: Invalid right_hand_joints shape" << std::endl;
-                    has_right_hand_joints = false;
+
+            if (right_hand_joints_idx >= 0) {
+                std::vector<double> right_values;
+                if (DecodeHandField(
+                        buffered_header_.fields[static_cast<size_t>(right_hand_joints_idx)],
+                        buffered_buffers_[static_cast<size_t>(right_hand_joints_idx)],
+                        7,
+                        needs_swap,
+                        "right_hand_joints",
+                        right_values)) {
+                    StoreHandAction(false, right_values);
                 }
             }
-            
-            // Set hand joints if present
-            if (has_left_hand_joints || has_right_hand_joints) {
-                has_hand_joints_ = true;
-                
-                if (has_left_hand_joints) {
-                    left_hand_joint_.SetData(left_hand_joint_values);
-                    if constexpr (DEBUG_LOGGING) {
-                        std::cout << "[ZMQEndpointInterface] Protocol v4: Left hand joints set: [";
-                        for (int j = 0; j < 7; ++j) {
-                            if (j > 0) std::cout << ", ";
-                            std::cout << std::fixed << std::setprecision(4) << left_hand_joint_values[j];
-                        }
-                        std::cout << "]" << std::endl;
-                    }
+
+            if (left_hand_action_idx >= 0) {
+                std::vector<double> left_values;
+                if (DecodeHandField(
+                        buffered_header_.fields[static_cast<size_t>(left_hand_action_idx)],
+                        buffered_buffers_[static_cast<size_t>(left_hand_action_idx)],
+                        6,
+                        needs_swap,
+                        "left_hand_action",
+                        left_values)) {
+                    StoreHandAction(true, left_values);
                 }
-                
-                if (has_right_hand_joints) {
-                    right_hand_joint_.SetData(right_hand_joint_values);
-                    if constexpr (DEBUG_LOGGING) {
-                        std::cout << "[ZMQEndpointInterface] Protocol v4: Right hand joints set: [";
-                        for (int j = 0; j < 7; ++j) {
-                            if (j > 0) std::cout << ", ";
-                            std::cout << std::fixed << std::setprecision(4) << right_hand_joint_values[j];
-                        }
-                        std::cout << "]" << std::endl;
-                    }
+            }
+
+            if (right_hand_action_idx >= 0) {
+                std::vector<double> right_values;
+                if (DecodeHandField(
+                        buffered_header_.fields[static_cast<size_t>(right_hand_action_idx)],
+                        buffered_buffers_[static_cast<size_t>(right_hand_action_idx)],
+                        6,
+                        needs_swap,
+                        "right_hand_action",
+                        right_values)) {
+                    StoreHandAction(false, right_values);
                 }
             }
             
@@ -1225,99 +1248,10 @@ private:
             }
         }
         
-        // Decode hand joint positions if present (7 DOF joint values)
-        bool has_left_hand_joints = (left_hand_joints_idx >= 0);
-        bool has_right_hand_joints = (right_hand_joints_idx >= 0);
-        auto [has_left_hand, left_hand_joint_values] = GetHandPose(true);
-        auto [has_right_hand, right_hand_joint_values] = GetHandPose(false);
-        
-        if (has_left_hand_joints) {
-            const auto& left_hand_field = buffered_header_.fields[left_hand_joints_idx];
-            const auto& left_hand_buf = buffered_buffers_[left_hand_joints_idx];
-            
-            // Validate shape: expect [7] or [1, 7]
-            int num_hand_joints = 0;
-            if (left_hand_field.shape.size() == 1 && left_hand_field.shape[0] == 7) {
-                num_hand_joints = 7;
-            } else if (left_hand_field.shape.size() == 2 && left_hand_field.shape[1] == 7) {
-                num_hand_joints = 7;
-            }
-            
-            if (num_hand_joints == 7) {
-                // Decode 7 joint values
-                if (left_hand_field.dtype == "f32") {
-                    for (int j = 0; j < 7; ++j) {
-                        float val;
-                        std::memcpy(&val, left_hand_buf.data() + j * sizeof(float), sizeof(float));
-                        if (needs_swap) val = byte_swap(val);
-                        left_hand_joint_values[j] = static_cast<double>(val);
-                    }
-                } else if (left_hand_field.dtype == "f64") {
-                    for (int j = 0; j < 7; ++j) {
-                        double val;
-                        std::memcpy(&val, left_hand_buf.data() + j * sizeof(double), sizeof(double));
-                        if (needs_swap) val = byte_swap(val);
-                        left_hand_joint_values[j] = val;
-                    }
-                }
-                
-                if constexpr (DEBUG_LOGGING) {
-                    std::cout << "[ZMQEndpointInterface] Decoded left_hand_joints: [";
-                    for (int j = 0; j < 7; ++j) {
-                        if (j > 0) std::cout << ", ";
-                        std::cout << std::fixed << std::setprecision(4) << left_hand_joint_values[j];
-                    }
-                    std::cout << "]" << std::endl;
-                }
-            } else {
-                std::cerr << "[ZMQEndpointInterface] Invalid left_hand_joints shape" << std::endl;
-                has_left_hand_joints = false;
-            }
-        }
-        
-        if (has_right_hand_joints) {
-            const auto& right_hand_field = buffered_header_.fields[right_hand_joints_idx];
-            const auto& right_hand_buf = buffered_buffers_[right_hand_joints_idx];
-            
-            // Validate shape: expect [7] or [1, 7]
-            int num_hand_joints = 0;
-            if (right_hand_field.shape.size() == 1 && right_hand_field.shape[0] == 7) {
-                num_hand_joints = 7;
-            } else if (right_hand_field.shape.size() == 2 && right_hand_field.shape[1] == 7) {
-                num_hand_joints = 7;
-            }
-            
-            if (num_hand_joints == 7) {
-                // Decode 7 joint values
-                if (right_hand_field.dtype == "f32") {
-                    for (int j = 0; j < 7; ++j) {
-                        float val;
-                        std::memcpy(&val, right_hand_buf.data() + j * sizeof(float), sizeof(float));
-                        if (needs_swap) val = byte_swap(val);
-                        right_hand_joint_values[j] = static_cast<double>(val);
-                    }
-                } else if (right_hand_field.dtype == "f64") {
-                    for (int j = 0; j < 7; ++j) {
-                        double val;
-                        std::memcpy(&val, right_hand_buf.data() + j * sizeof(double), sizeof(double));
-                        if (needs_swap) val = byte_swap(val);
-                        right_hand_joint_values[j] = val;
-                    }
-                }
-                
-                if constexpr (DEBUG_LOGGING) {
-                    std::cout << "[ZMQEndpointInterface] Decoded right_hand_joints: [";
-                    for (int j = 0; j < 7; ++j) {
-                        if (j > 0) std::cout << ", ";
-                        std::cout << std::fixed << std::setprecision(4) << right_hand_joint_values[j];
-                    }
-                    std::cout << "]" << std::endl;
-                }
-            } else {
-                std::cerr << "[ZMQEndpointInterface] Invalid right_hand_joints shape" << std::endl;
-                has_right_hand_joints = false;
-            }
-        }
+        const bool has_left_hand_joints = (left_hand_joints_idx >= 0);
+        const bool has_right_hand_joints = (right_hand_joints_idx >= 0);
+        const bool has_left_hand_action = (left_hand_action_idx >= 0);
+        const bool has_right_hand_action = (right_hand_action_idx >= 0);
         
         // ===== Decode VR 3-point tracking data if present =====
         // VR 3-point format:
@@ -1716,32 +1650,55 @@ private:
         result.frame_step = merge_result.frame_step;
         result.protocol_version = merge_result.protocol_version;
         
-        // Handle hand joints: set hand joint values directly from decoded data
-        if (has_left_hand_joints || has_right_hand_joints) {
-            has_hand_joints_ = true;
-            
-            if (has_left_hand_joints) {
-                left_hand_joint_.SetData(left_hand_joint_values);
-                if constexpr (DEBUG_LOGGING) {
-                    std::cout << "[ZMQEndpointInterface] Left hand joints set: [";
-                    for (int j = 0; j < 7; ++j) {
-                        if (j > 0) std::cout << ", ";
-                        std::cout << std::fixed << std::setprecision(4) << left_hand_joint_values[j];
-                    }
-                    std::cout << "]" << std::endl;
-                }
+        if (has_left_hand_joints) {
+            std::vector<double> left_values;
+            if (DecodeHandField(
+                    buffered_header_.fields[static_cast<size_t>(left_hand_joints_idx)],
+                    buffered_buffers_[static_cast<size_t>(left_hand_joints_idx)],
+                    7,
+                    needs_swap,
+                    "left_hand_joints",
+                    left_values)) {
+                StoreHandAction(true, left_values);
             }
-            
-            if (has_right_hand_joints) {
-                right_hand_joint_.SetData(right_hand_joint_values);
-                if constexpr (DEBUG_LOGGING) {
-                    std::cout << "[ZMQEndpointInterface] Right hand joints set: [";
-                    for (int j = 0; j < 7; ++j) {
-                        if (j > 0) std::cout << ", ";
-                        std::cout << std::fixed << std::setprecision(4) << right_hand_joint_values[j];
-                    }
-                    std::cout << "]" << std::endl;
-                }
+        }
+
+        if (has_right_hand_joints) {
+            std::vector<double> right_values;
+            if (DecodeHandField(
+                    buffered_header_.fields[static_cast<size_t>(right_hand_joints_idx)],
+                    buffered_buffers_[static_cast<size_t>(right_hand_joints_idx)],
+                    7,
+                    needs_swap,
+                    "right_hand_joints",
+                    right_values)) {
+                StoreHandAction(false, right_values);
+            }
+        }
+
+        if (has_left_hand_action) {
+            std::vector<double> left_values;
+            if (DecodeHandField(
+                    buffered_header_.fields[static_cast<size_t>(left_hand_action_idx)],
+                    buffered_buffers_[static_cast<size_t>(left_hand_action_idx)],
+                    6,
+                    needs_swap,
+                    "left_hand_action",
+                    left_values)) {
+                StoreHandAction(true, left_values);
+            }
+        }
+
+        if (has_right_hand_action) {
+            std::vector<double> right_values;
+            if (DecodeHandField(
+                    buffered_header_.fields[static_cast<size_t>(right_hand_action_idx)],
+                    buffered_buffers_[static_cast<size_t>(right_hand_action_idx)],
+                    6,
+                    needs_swap,
+                    "right_hand_action",
+                    right_values)) {
+                StoreHandAction(false, right_values);
             }
         }
         

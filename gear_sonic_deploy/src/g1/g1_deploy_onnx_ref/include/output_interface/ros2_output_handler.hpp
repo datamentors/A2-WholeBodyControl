@@ -164,8 +164,8 @@ public:
         const std::array<double, 9>& vr_3point_position,
         const std::array<double, 12>& vr_3point_orientation,
         const std::array<double, 3>& vr_3point_compliance,
-        const std::array<double, 7>& left_hand_joint,
-        const std::array<double, 7>& right_hand_joint,
+        const std::vector<double>& left_hand_joint,
+        const std::vector<double>& right_hand_joint,
         const std::array<double, 4>& init_ref_data_root_rot_array,
         DataBuffer<HeadingState>& heading_state_buffer,
         std::shared_ptr<const MotionSequence> current_motion,
@@ -558,4 +558,3 @@ private:
 #endif // HAS_ROS2
 
 #endif // ROS2_OUTPUT_HANDLER_HPP
-

@@ -113,6 +113,12 @@ class InferenceLaunchConfig:
     deploy_output_type: str = ""
     """Output type for deploy.sh. Leave empty for default."""
 
+    hand_type: str = "dex3"
+    """Hand backend for both deploy and VLA inference: ``dex3``, ``inspire``, or ``none``."""
+
+    hand_dry_run: bool = False
+    """Allow the Inspire deployment backend to run in explicit stub mode."""
+
     # VLA inference options
     policy_host: str = "localhost"
     """Isaac-GR00T PolicyServer host."""
@@ -309,6 +315,7 @@ def main(config: InferenceLaunchConfig):
         f"./deploy.sh "
         f"--input-type {config.deploy_input_type} "
         f"--zmq-host {config.deploy_zmq_host} "
+        f"--hand-type {config.hand_type} "
     )
     if config.deploy_checkpoint:
         deploy_cmd += f"--cp {config.deploy_checkpoint} "
@@ -320,6 +327,8 @@ def main(config: InferenceLaunchConfig):
         deploy_cmd += f"--motion-data {config.deploy_motion_data} "
     if config.deploy_output_type:
         deploy_cmd += f"--output-type {config.deploy_output_type} "
+    if config.hand_dry_run:
+        deploy_cmd += "--hand-dry-run "
     deploy_cmd += deploy_mode
 
     print("Starting C++ deploy (pane 0)...")
@@ -380,6 +389,7 @@ def main(config: InferenceLaunchConfig):
         f"--host {config.policy_host} "
         f"--port {config.policy_port} "
         f"--embodiment-tag {config.embodiment_tag} "
+        f"--hand-type {config.hand_type} "
         f"--prompt '{config.prompt}' "
         f"--action-publish-rate {config.action_publish_rate} "
         f"--action-horizon {config.action_horizon} "

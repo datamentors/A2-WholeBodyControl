@@ -130,8 +130,9 @@
 // Control policy
 #include "../include/control_policy.hpp"
 
-// Dex3 hands
-#include "../include/dex3_hands.hpp"
+// Hand backends
+#include "../include/hand_controller.hpp"
+#include "../include/hand_types.hpp"
 
 // Error monitor
 #include "../include/error_monitor.hpp"
@@ -196,8 +197,8 @@ class G1Deploy {
     std::array<double, 20> vr_5point_orientation_buffer_;
     bool has_left_hand_data_ = false;
     bool has_right_hand_data_ = false;
-    std::array<double, 7> left_hand_joint_buffer_;
-    std::array<double, 7> right_hand_joint_buffer_;
+    std::vector<double> left_hand_joint_buffer_;
+    std::vector<double> right_hand_joint_buffer_;
     bool has_upper_body_data_ = false;
     std::array<double, 17> upper_body_joint_positions_buffer_;
     std::array<double, 17> upper_body_joint_velocities_buffer_;
@@ -278,8 +279,9 @@ class G1Deploy {
     // =========================================================================
     std::unique_ptr<unitree::robot::b2::MotionSwitcherClient> msc_;
     
-    // Dex3 hands manager
-    Dex3Hands dex3_hands_;
+    // Selectable hand backend manager
+    std::unique_ptr<HandController> hand_controller_;
+    HandBackend hand_backend_ = HandBackend::DEX3;
 
     // Motor error monitor (tracks fault state transitions)
     ErrorMonitor error_monitor_;
@@ -296,8 +298,8 @@ class G1Deploy {
     static constexpr std::chrono::milliseconds LOW_STATE_ABSENT_THRESHOLD{500};
     ProgramState program_state_;
     std::array<double, G1_NUM_MOTOR> last_action;
-    std::array<double, 7> last_left_hand_action;
-    std::array<double, 7> last_right_hand_action;
+    std::vector<double> last_left_hand_action;
+    std::vector<double> last_right_hand_action;
     
     // =========================================================================
     // Logging / recording streams
@@ -2159,7 +2161,9 @@ class G1Deploy {
       std::string zmq_out_topic = "g1_debug",
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
-      double initial_max_close_ratio = 1.0)
+      double initial_max_close_ratio = 1.0,
+      HandBackend hand_backend = HandBackend::DEX3,
+      bool hand_dry_run = false)
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2172,11 +2176,12 @@ class G1Deploy {
         disable_crc_check_(disable_crc_check),
         program_state_(ProgramState::INIT),
         last_action {0.0},
-        last_left_hand_action {0.0},
-        last_right_hand_action {0.0},
+        last_left_hand_action(static_cast<size_t>(HandBackendDof(hand_backend)), 0.0),
+        last_right_hand_action(static_cast<size_t>(HandBackendDof(hand_backend)), 0.0),
         enable_motion_recording_(enable_motion_recording),
         initial_vr_3point_compliance_(initial_compliance),
         initial_max_close_ratio_(initial_max_close_ratio),
+        hand_backend_(hand_backend),
         //env(ORT_LOGGING_LEVEL_WARNING, "G1Deploy"),
         model_path(model_file_path),
         planner_path(planner_file_path) {
@@ -2184,8 +2189,12 @@ class G1Deploy {
       // Initialize ChannelFactory
       ChannelFactory::Instance()->Init(0, networkInterface);
 
-      // Initialize Dex3 hands (ChannelFactory already initialized above)
-      dex3_hands_.initialize("");
+      hand_controller_ = CreateHandController(hand_backend_, hand_dry_run);
+      left_hand_joint_buffer_.assign(static_cast<size_t>(hand_controller_->dof()), 0.0);
+      right_hand_joint_buffer_.assign(static_cast<size_t>(hand_controller_->dof()), 0.0);
+      hand_controller_->initialize("");
+      std::cout << "[INFO] Hand backend: " << HandBackendToString(hand_backend_)
+                << " (dof=" << hand_controller_->dof() << ")" << std::endl;
 
       audio_thread_ = std::make_unique<AudioThread>();
 
@@ -2518,7 +2527,9 @@ class G1Deploy {
         input_interface_->SetVR3PointCompliance(initial_vr_3point_compliance_);
         // Set initial max close ratio for hands (keyboard-controlled: X/C keys)
         input_interface_->SetMaxCloseRatio(initial_max_close_ratio_);
-        dex3_hands_.SetMaxCloseRatio(initial_max_close_ratio_);
+        if (hand_controller_) {
+          hand_controller_->setMaxCloseRatio(initial_max_close_ratio_);
+        }
         std::cout << "[INFO] Initial VR 3-point compliance: ["
                   << initial_vr_3point_compliance_[0] << ", "
                   << initial_vr_3point_compliance_[1] << ", "
@@ -2678,8 +2689,9 @@ class G1Deploy {
         lowcmd_publisher_->Write(dds_low_command);
       }
 
-      // Publish Dex3 hand commands at the same publish cadence
-      dex3_hands_.writeOnce();
+      if (hand_controller_) {
+        hand_controller_->writeOnce();
+      }
     }
 
     /// Gracefully stop all threads and send a damping-only command.
@@ -2748,12 +2760,16 @@ class G1Deploy {
           motor_command_tmp.q_target.at(i) =
               static_cast<float>(current_pos * (1.0 - ratio) + default_angles[i] * ratio);
         }
-        dex3_hands_.close(true);
-        dex3_hands_.close(false);
+        if (hand_controller_) {
+          hand_controller_->close(true);
+          hand_controller_->close(false);
+        }
       } else {
         program_state_ = ProgramState::WAIT_FOR_CONTROL;
-        dex3_hands_.open(true);
-        dex3_hands_.open(false);
+        if (hand_controller_) {
+          hand_controller_->open(true);
+          hand_controller_->open(false);
+        }
         std::cout << "Init Done" << std::endl;
       }
       motor_command_buffer_.SetData(motor_command_tmp);
@@ -2900,26 +2916,18 @@ class G1Deploy {
       std::array<double, 3> body_torso_ang_vel = float_to_double<3>(imu_torso->gyroscope());
       std::array<double, 3> body_torso_accel = float_to_double<3>(imu_torso->accelerometer());
 
-      // Collect hand states from Dex3 hands
-      std::array<double, 7> left_hand_q = {0.0};
-      std::array<double, 7> left_hand_dq = {0.0};
-      std::array<double, 7> right_hand_q = {0.0};
-      std::array<double, 7> right_hand_dq = {0.0};
-      
-      auto left_hand_state_ptr = dex3_hands_.getState(true);
-      if (left_hand_state_ptr) {
-        for (int i = 0; i < 7; ++i) {
-          left_hand_q[i] = left_hand_state_ptr->motor_state()[i].q();
-          left_hand_dq[i] = left_hand_state_ptr->motor_state()[i].dq();
-        }
-      }
-      
-      auto right_hand_state_ptr = dex3_hands_.getState(false);
-      if (right_hand_state_ptr) {
-        for (int i = 0; i < 7; ++i) {
-          right_hand_q[i] = right_hand_state_ptr->motor_state()[i].q();
-          right_hand_dq[i] = right_hand_state_ptr->motor_state()[i].dq();
-        }
+      std::vector<double> left_hand_q;
+      std::vector<double> left_hand_dq;
+      std::vector<double> right_hand_q;
+      std::vector<double> right_hand_dq;
+
+      if (hand_controller_) {
+        auto left_hand_state = hand_controller_->getState(true);
+        auto right_hand_state = hand_controller_->getState(false);
+        left_hand_q = std::move(left_hand_state.q);
+        left_hand_dq = std::move(left_hand_state.dq);
+        right_hand_q = std::move(right_hand_state.q);
+        right_hand_dq = std::move(right_hand_state.dq);
       }
 
       // Log robot state for analysis and debugging
@@ -2969,8 +2977,8 @@ class G1Deploy {
       vr_3point_compliance_buffer_ = input_interface_->GetVR3PointCompliance();
       std::tie(has_vr_5point_data_, vr_5point_position_buffer_) = input_interface_->GetVR5PointPosition();
       std::tie(std::ignore, vr_5point_orientation_buffer_) = input_interface_->GetVR5PointOrientation();
-      std::tie(has_left_hand_data_, left_hand_joint_buffer_) = input_interface_->GetHandPose(true);
-      std::tie(has_right_hand_data_, right_hand_joint_buffer_) = input_interface_->GetHandPose(false);
+      std::tie(has_left_hand_data_, left_hand_joint_buffer_) = input_interface_->GetHandAction(true);
+      std::tie(has_right_hand_data_, right_hand_joint_buffer_) = input_interface_->GetHandAction(false);
       std::tie(has_upper_body_data_, upper_body_joint_positions_buffer_) = input_interface_->GetUpperBodyJointPositions();
       std::tie(std::ignore, upper_body_joint_velocities_buffer_) = input_interface_->GetUpperBodyJointVelocities();
 
@@ -3950,18 +3958,14 @@ class G1Deploy {
           }
           auto motor_command_end_time = std::chrono::steady_clock::now();
 
-          // Update Dex3 hands max close ratio from keyboard-controlled value (X/C keys)
-          dex3_hands_.SetMaxCloseRatio(input_interface_->GetMaxCloseRatio());
-          
-          // set hand poses (use buffered data for consistency)
-          dex3_hands_.setAllJointsCommand(true, left_hand_joint_buffer_);
-          dex3_hands_.setAllJointsCommand(false, right_hand_joint_buffer_);
-          
-          // Update last hand actions for logging (use buffered data)
-          for (int i = 0; i < 7; ++i) {
-            last_left_hand_action[i] = left_hand_joint_buffer_[i];
-            last_right_hand_action[i] = right_hand_joint_buffer_[i];
+          if (hand_controller_) {
+            hand_controller_->setMaxCloseRatio(input_interface_->GetMaxCloseRatio());
+            hand_controller_->setCommand(true, left_hand_joint_buffer_);
+            hand_controller_->setCommand(false, right_hand_joint_buffer_);
           }
+
+          last_left_hand_action = left_hand_joint_buffer_;
+          last_right_hand_action = right_hand_joint_buffer_;
           
           auto hand_joint_end_time = std::chrono::steady_clock::now();
 
@@ -4072,7 +4076,8 @@ class G1Deploy {
             }
             
             // Print hand max close ratio (keyboard-controlled via X/C keys)
-            std::cout << " | HandCloseRatio: " << dex3_hands_.GetMaxCloseRatio();
+            const double max_close_ratio = hand_controller_ ? hand_controller_->getMaxCloseRatio() : 1.0;
+            std::cout << " | HandCloseRatio: " << max_close_ratio;
             
             std::cout << std::endl;
           }
@@ -4137,6 +4142,8 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --max-close-ratio <value>: set initial hand max close ratio (0.2-1.0; default: 1.0 = full closure)" << std::endl;
     std::cout << "                             0.2 = limited (80% open), 1.0 = full closure allowed" << std::endl;
     std::cout << "                             Keyboard controls: x/c = +/- 0.1 (always available)" << std::endl;
+    std::cout << "  --hand-type <dex3|inspire|none>: select the hand backend (default: dex3)" << std::endl;
+    std::cout << "  --hand-dry-run: allow the Inspire backend to run in explicit stub mode" << std::endl;
     std::cout << "\nExamples:" << std::endl;
     std::cout << "  " << argv[0] << " enp5s0 policy/single_frame/model.onnx reference/bones_072925_test/ --planner-file policy/planner.onnx --obs-config policy/single_frame/observation_config.yaml --disable-crc-check" << std::endl;
     std::cout << "  " << argv[0] << " enp5s0 policy/token/model.onnx reference/bones_072925_test/ --obs-config policy/token/observation_config.yaml --encoder-file policy/token/encoder.onnx" << std::endl;
@@ -4180,6 +4187,8 @@ int main(int argc, char const* argv[]) {
   std::string zmq_out_topic = "g1_debug";
   std::array<double, 3> initial_compliance = {0.5, 0.5, 0.0}; // initial compliance is 0.5 for both hands (keyboard controllable)
   double initial_max_close_ratio = 1.0; // default allows full closure, use --max-close-ratio to limit
+  HandBackend hand_backend = HandBackend::DEX3;
+  bool hand_dry_run = false;
   for (int i = 4; i < argc; i++) {
     if (std::string(argv[i]) == "--disable-crc-check") {
       disableCrcCheck = true;
@@ -4409,6 +4418,23 @@ int main(int argc, char const* argv[]) {
         std::cerr << "Error: --max-close-ratio requires a value argument" << std::endl;
         exit(1);
       }
+    } else if (std::string(argv[i]) == "--hand-type") {
+      if (i + 1 < argc) {
+        auto parsed_backend = ParseHandBackend(argv[i + 1]);
+        if (!parsed_backend.has_value()) {
+          std::cerr << "Error: --hand-type must be one of 'dex3', 'inspire', or 'none'" << std::endl;
+          exit(1);
+        }
+        hand_backend = *parsed_backend;
+        std::cout << "[INFO] Using hand backend: " << HandBackendToString(hand_backend) << std::endl;
+        i++;
+      } else {
+        std::cerr << "Error: --hand-type requires a value argument" << std::endl;
+        exit(1);
+      }
+    } else if (std::string(argv[i]) == "--hand-dry-run") {
+      hand_dry_run = true;
+      std::cout << "[INFO] Hand dry-run mode enabled" << std::endl;
     }
   }
 
@@ -4441,7 +4467,9 @@ int main(int argc, char const* argv[]) {
     zmq_out_topic,
     enableMotionRecording,
     initial_compliance,
-    initial_max_close_ratio
+    initial_max_close_ratio,
+    hand_backend,
+    hand_dry_run
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   
@@ -4468,4 +4496,3 @@ int main(int argc, char const* argv[]) {
   std::cout << "[DEBUG] Program exiting normally..." << std::endl;
   return 0;
 }
-

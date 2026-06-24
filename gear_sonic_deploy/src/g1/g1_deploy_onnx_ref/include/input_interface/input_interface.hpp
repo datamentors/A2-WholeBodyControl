@@ -39,6 +39,7 @@
 #include "../motion_data_reader.hpp" // For MotionDataReader, MotionSequence
 #include "../math_utils.hpp"         // For float_to_double
 #include "../localmotion_kplanner.hpp" // For PlannerState, MovementState
+#include "../hand_types.hpp"
 
 /**
  * @class InputInterface
@@ -364,6 +365,26 @@ public:
         }
     }
 
+    /// @brief Get the latest backend-native hand action vector.
+    virtual std::pair<bool, std::vector<double>> GetHandAction(bool is_left) const {
+        if (!has_hand_joints_) {
+            return {false, {}};
+        }
+
+        const auto& action_buffer = is_left ? left_hand_action_ : right_hand_action_;
+        auto action_data = action_buffer.GetDataWithTime();
+        if (action_data.data) {
+            return {true, *action_data.data};
+        }
+
+        const auto& joint_buffer = is_left ? left_hand_joint_ : right_hand_joint_;
+        auto joint_data = joint_buffer.GetDataWithTime();
+        if (joint_data.data) {
+            return {true, std::vector<double>(joint_data.data->begin(), joint_data.data->end())};
+        }
+        return {false, {}};
+    }
+
     /// @brief Get upper-body joint target positions (17 DOF, radians).
     /// @return {true, positions} if upper-body data is available; {false, zeros} otherwise.
     virtual std::pair<bool, std::array<double, 17>> GetUpperBodyJointPositions() const {
@@ -488,6 +509,10 @@ protected:
     DataBuffer<std::array<double, 7>> left_hand_joint_;
     /// Right-hand Dex3 joint positions (7 DOF).
     DataBuffer<std::array<double, 7>> right_hand_joint_;
+    /// Left-hand backend-native action vector (e.g. Dex3-7 or Inspire-6).
+    DataBuffer<std::vector<double>> left_hand_action_;
+    /// Right-hand backend-native action vector (e.g. Dex3-7 or Inspire-6).
+    DataBuffer<std::vector<double>> right_hand_action_;
     
     /// Arbitrary external token-state vector (e.g. latent codes from a remote model).
     DataBuffer<std::vector<double>> external_token_state_;

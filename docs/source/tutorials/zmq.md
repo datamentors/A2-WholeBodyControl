@@ -303,10 +303,12 @@ Unlike v1–v3, Protocol v4 does **not** carry motion frames — the reference m
 | `frame_index` | `[1]` | `i32` / `i64` | Frame index (for logging only, does not affect playback) |
 | `left_hand_joints` | `[7]` or `[1, 7]` | `f32` / `f64` | Left hand 7-DOF Dex3 joint positions |
 | `right_hand_joints` | `[7]` or `[1, 7]` | `f32` / `f64` | Right hand 7-DOF Dex3 joint positions |
+| `left_hand_action` | `[6]` or `[1, 6]` | `f32` / `f64` | Left hand 6-DOF Inspire-native action |
+| `right_hand_action` | `[6]` or `[1, 6]` | `f32` / `f64` | Right hand 6-DOF Inspire-native action |
 | `body_quat_w` | `[4]` or `[1, 4]` | `f32` / `f64` | Body quaternion (w,x,y,z) for heading updates |
 
 - The `token_state` dimension is validated against the encoder configuration. A mismatch is logged as a warning.
-- Hand joints, when provided, are applied to the robot directly (same as v1–v3 optional hand fields).
+- Dex3 hand joints and Inspire hand actions, when provided, are applied to the selected hand backend directly.
 - `body_quat_w` can be used to update the heading reference during token streaming.
 
 **Common errors:**
@@ -335,6 +337,8 @@ The following optional fields can be included in any protocol version:
 |-------|-------|-------|-------------|
 | `left_hand_joints` | `[7]` or `[1, 7]` | `f32` / `f64` | Left hand 7-DOF Dex3 joint positions |
 | `right_hand_joints` | `[7]` or `[1, 7]` | `f32` / `f64` | Right hand 7-DOF Dex3 joint positions |
+| `left_hand_action` | `[6]` or `[1, 6]` | `f32` / `f64` | Left hand 6-DOF Inspire-native action |
+| `right_hand_action` | `[6]` or `[1, 6]` | `f32` / `f64` | Right hand 6-DOF Inspire-native action |
 | `vr_position` | `[9]` or `[3, 3]` | `f32` / `f64` | VR 3-point tracking positions: left wrist, right wrist, head (xyz × 3) |
 | `vr_orientation` | `[12]` or `[3, 4]` | `f32` / `f64` | VR 3-point orientations: left, right, head quaternions (wxyz × 3) |
 | `catch_up` | scalar | `bool` / `u8` / `i32` | If `true` (default), resets playback when a large frame gap is detected |

@@ -254,6 +254,13 @@ class InterfaceManager : public InputInterface {
       }
       return InputInterface::GetHandPose(is_left);  // Fallback to base class
     }
+
+    std::pair<bool, std::vector<double>> GetHandAction(bool is_left) const override {
+      if (current_) {
+        return current_->GetHandAction(is_left);
+      }
+      return InputInterface::GetHandAction(is_left);
+    }
     
     std::pair<bool, std::vector<double>> GetExternalTokenState() const override {
       if (current_) {
@@ -392,5 +399,4 @@ class InterfaceManager : public InputInterface {
 };
 
 #endif // INTERFACE_MANAGER_HPP
-
 

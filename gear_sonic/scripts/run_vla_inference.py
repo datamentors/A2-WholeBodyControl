@@ -56,6 +56,8 @@ from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     pack_pose_message,
 )
 
+HAND_BACKEND_TO_DIM = {"dex3": 7, "inspire": 6, "none": 0}
+
 
 @dataclass
 class InferenceConfig:
@@ -110,6 +112,9 @@ class InferenceConfig:
     embodiment_tag: str = "unitree_g1_sonic"
     """Embodiment tag for policy inference."""
 
+    hand_type: str = "dex3"
+    """Hand backend for action packing: ``dex3``, ``inspire``, or ``none``."""
+
     # Prompt / eval
     prompt: str = "demo"
     """The language prompt for the VLA policy."""
@@ -137,16 +142,18 @@ def print_green(x):
 def pack_latent_action_message(
     motion_token: np.ndarray,
     frame_index: np.ndarray,
-    left_hand_joints: np.ndarray = None,
-    right_hand_joints: np.ndarray = None,
+    hand_type: str = "dex3",
+    left_hand_action: np.ndarray = None,
+    right_hand_action: np.ndarray = None,
 ) -> bytes:
     """Pack a single motion-token action into a ZMQ message (Protocol v4).
 
     Args:
         motion_token: Shape ``[64]`` (flat) or ``[1, 64]``.
         frame_index:  Shape ``[1]``.
-        left_hand_joints:  Shape ``[7]`` or ``[1, 7]``, optional.
-        right_hand_joints: Shape ``[7]`` or ``[1, 7]``, optional.
+        hand_type: Hand backend selector: ``dex3``, ``inspire``, or ``none``.
+        left_hand_action:  Backend-native hand action, optional.
+        right_hand_action: Backend-native hand action, optional.
 
     Returns:
         Packed ZMQ message bytes.
@@ -167,25 +174,39 @@ def pack_latent_action_message(
         "frame_index": frame_index,
     }
 
-    if left_hand_joints is not None:
-        left_hand_joints = np.asarray(left_hand_joints, dtype=np.float32)
-        if left_hand_joints.ndim == 1:
-            if left_hand_joints.shape[0] != 7:
-                raise ValueError(
-                    f"left_hand_joints must have shape [7], got {left_hand_joints.shape}"
-                )
-            left_hand_joints = left_hand_joints.reshape(1, 7)
-        pose_data["left_hand_joints"] = left_hand_joints
+    if hand_type not in HAND_BACKEND_TO_DIM:
+        raise ValueError(f"Unsupported hand_type '{hand_type}'")
 
-    if right_hand_joints is not None:
-        right_hand_joints = np.asarray(right_hand_joints, dtype=np.float32)
-        if right_hand_joints.ndim == 1:
-            if right_hand_joints.shape[0] != 7:
+    expected_dim = HAND_BACKEND_TO_DIM[hand_type]
+    if hand_type == "dex3":
+        left_field_name = "left_hand_joints"
+        right_field_name = "right_hand_joints"
+    elif hand_type == "inspire":
+        left_field_name = "left_hand_action"
+        right_field_name = "right_hand_action"
+    else:
+        left_field_name = ""
+        right_field_name = ""
+
+    if hand_type != "none" and left_hand_action is not None:
+        left_hand_action = np.asarray(left_hand_action, dtype=np.float32)
+        if left_hand_action.ndim == 1:
+            if left_hand_action.shape[0] != expected_dim:
                 raise ValueError(
-                    f"right_hand_joints must have shape [7], got {right_hand_joints.shape}"
+                    f"{left_field_name} must have shape [{expected_dim}], got {left_hand_action.shape}"
                 )
-            right_hand_joints = right_hand_joints.reshape(1, 7)
-        pose_data["right_hand_joints"] = right_hand_joints
+            left_hand_action = left_hand_action.reshape(1, expected_dim)
+        pose_data[left_field_name] = left_hand_action
+
+    if hand_type != "none" and right_hand_action is not None:
+        right_hand_action = np.asarray(right_hand_action, dtype=np.float32)
+        if right_hand_action.ndim == 1:
+            if right_hand_action.shape[0] != expected_dim:
+                raise ValueError(
+                    f"{right_field_name} must have shape [{expected_dim}], got {right_hand_action.shape}"
+                )
+            right_hand_action = right_hand_action.reshape(1, expected_dim)
+        pose_data[right_field_name] = right_hand_action
 
     return pack_pose_message(pose_data, topic="pose", version=4)
 
@@ -395,6 +416,7 @@ def main(config: InferenceConfig):
         f"ZMQ action socket bound to tcp://{config.action_zmq_host}:{config.action_zmq_port}"
     )
     print_green(f"Using embodiment tag: {config.embodiment_tag}")
+    print_green(f"Using hand backend: {config.hand_type}")
 
     keyboard_listener = ZMQKeyboardSubscriber(
         port=config.keyboard_zmq_port, host=config.keyboard_zmq_host
@@ -413,24 +435,27 @@ def main(config: InferenceConfig):
     initial_pose_left_hand_closed = False
     initial_pose_right_hand_closed = False
 
+    def _initial_pose_hand_action(side: str, closed: bool) -> np.ndarray | None:
+        hand_dim = HAND_BACKEND_TO_DIM[config.hand_type]
+        if config.hand_type == "none":
+            return None
+        if not closed:
+            return np.zeros(hand_dim, dtype=np.float32)
+        if config.hand_type == "dex3":
+            return _compute_closed_hand_joints(side)
+        return np.ones(hand_dim, dtype=np.float32)
+
     def publish_initial_pose():
         """Publish initial pose command to move robot to starting position."""
         print("Moving to initial pose")
-        left_hand = (
-            _compute_closed_hand_joints("L")
-            if initial_pose_left_hand_closed
-            else np.zeros(7, dtype=np.float32)
-        )
-        right_hand = (
-            _compute_closed_hand_joints("R")
-            if initial_pose_right_hand_closed
-            else np.zeros(7, dtype=np.float32)
-        )
+        left_hand = _initial_pose_hand_action("L", initial_pose_left_hand_closed)
+        right_hand = _initial_pose_hand_action("R", initial_pose_right_hand_closed)
         zmq_message = pack_latent_action_message(
             motion_token=LATENT_INITIAL_MOTION_TOKEN,
             frame_index=np.array([0], dtype=np.int64),
-            left_hand_joints=left_hand,
-            right_hand_joints=right_hand,
+            hand_type=config.hand_type,
+            left_hand_action=left_hand,
+            right_hand_action=right_hand,
         )
         zmq_socket.send(zmq_message)
         print_green("Sent latent initial pose via ZMQ")
@@ -455,16 +480,8 @@ def main(config: InferenceConfig):
         num_steps = max(1, round(config.action_publish_rate * duration_s))
         step_period = 1.0 / config.action_publish_rate
 
-        left_hand = (
-            _compute_closed_hand_joints("L")
-            if initial_pose_left_hand_closed
-            else np.zeros(7, dtype=np.float32)
-        )
-        right_hand = (
-            _compute_closed_hand_joints("R")
-            if initial_pose_right_hand_closed
-            else np.zeros(7, dtype=np.float32)
-        )
+        left_hand = _initial_pose_hand_action("L", initial_pose_left_hand_closed)
+        right_hand = _initial_pose_hand_action("R", initial_pose_right_hand_closed)
 
         print(
             f"Blending to initial pose over {duration_s:.2f}s "
@@ -480,8 +497,9 @@ def main(config: InferenceConfig):
             zmq_message = pack_latent_action_message(
                 motion_token=blended_token,
                 frame_index=np.array([0], dtype=np.int64),
-                left_hand_joints=left_hand,
-                right_hand_joints=right_hand,
+                hand_type=config.hand_type,
+                left_hand_action=left_hand,
+                right_hand_action=right_hand,
             )
             zmq_socket.send(zmq_message)
             last_sent_motion_token = blended_token.copy()
@@ -692,33 +710,42 @@ def main(config: InferenceConfig):
                         get_action_field(processed_action, "motion_token"),
                         dtype=np.float32,
                     )
-                    left_hand_joints = np.asarray(
-                        get_action_field(processed_action, "left_hand_joints"),
-                        dtype=np.float32,
+                    left_hand_field = (
+                        "left_hand_joints" if config.hand_type == "dex3" else "left_hand_action"
                     )
-                    right_hand_joints = np.asarray(
-                        get_action_field(processed_action, "right_hand_joints"),
-                        dtype=np.float32,
+                    right_hand_field = (
+                        "right_hand_joints" if config.hand_type == "dex3" else "right_hand_action"
                     )
+                    left_hand_action = None
+                    right_hand_action = None
+                    if config.hand_type != "none":
+                        left_hand_action = np.asarray(
+                            get_action_field(processed_action, left_hand_field),
+                            dtype=np.float32,
+                        )
+                        right_hand_action = np.asarray(
+                            get_action_field(processed_action, right_hand_field),
+                            dtype=np.float32,
+                        )
 
                     # Action arrays arrive as (B, T, D) from the model.
                     # Squeeze batch dim to get (T, D), then index by time step.
                     if motion_token.ndim == 3:
                         motion_token = motion_token[0]
-                    if left_hand_joints.ndim == 3:
-                        left_hand_joints = left_hand_joints[0]
-                    if right_hand_joints.ndim == 3:
-                        right_hand_joints = right_hand_joints[0]
+                    if left_hand_action is not None and left_hand_action.ndim == 3:
+                        left_hand_action = left_hand_action[0]
+                    if right_hand_action is not None and right_hand_action.ndim == 3:
+                        right_hand_action = right_hand_action[0]
 
                     horizon = motion_token.shape[0] if motion_token.ndim == 2 else 1
                     current_idx = min(action_chunk_index, horizon - 1)
 
                     if motion_token.ndim == 2:
                         motion_token = motion_token[current_idx]
-                    if left_hand_joints.ndim == 2:
-                        left_hand_joints = left_hand_joints[current_idx]
-                    if right_hand_joints.ndim == 2:
-                        right_hand_joints = right_hand_joints[current_idx]
+                    if left_hand_action is not None and left_hand_action.ndim == 2:
+                        left_hand_action = left_hand_action[current_idx]
+                    if right_hand_action is not None and right_hand_action.ndim == 2:
+                        right_hand_action = right_hand_action[current_idx]
 
                     frame_index = np.array([zmq_frame_counter], dtype=np.int64)
                     zmq_frame_counter += 1
@@ -726,8 +753,9 @@ def main(config: InferenceConfig):
                     zmq_message = pack_latent_action_message(
                         motion_token,
                         frame_index,
-                        left_hand_joints=left_hand_joints,
-                        right_hand_joints=right_hand_joints,
+                        hand_type=config.hand_type,
+                        left_hand_action=left_hand_action,
+                        right_hand_action=right_hand_action,
                     )
                     zmq_socket.send(zmq_message)
                     last_sent_motion_token = motion_token.copy()

@@ -115,8 +115,12 @@ the Python VLA inference client, keyboard publisher, and optional data exporter.
 
 ## Action Space
 
-The Sonic embodiment (`unitree_g1_sonic`) uses a 78-dimensional action
-space: 64-dim motion token + 7-dim left hand joints + 7-dim right hand joints.
+The Dex3 Sonic embodiment (`unitree_g1_sonic` / `unitree_g1_sonic_dex3`) uses a
+78-dimensional action space: 64-dim motion token + 7-dim left hand joints + 7-dim
+right hand joints.
+
+The Inspire-native variant (`unitree_g1_sonic_inspire`) uses a 76-dimensional action
+space: 64-dim motion token + 6-dim left hand action + 6-dim right hand action.
 
 ## Quick Start — tmux Launcher
 
@@ -250,6 +254,7 @@ python gear_sonic/scripts/run_data_exporter.py \
 | `--host` | `localhost` | PolicyServer host |
 | `--port` | `5550` | PolicyServer port |
 | `--embodiment-tag` | `unitree_g1_sonic` | Embodiment tag |
+| `--hand-type` | `dex3` | Hand backend: `dex3`, `inspire`, or `none` |
 | `--prompt` | `demo` | Language prompt |
 | `--action-publish-rate` | `50` | Action publish rate (Hz) |
 | `--action-horizon` | `40` | Actions per inference chunk |

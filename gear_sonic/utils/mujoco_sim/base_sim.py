@@ -258,33 +258,32 @@ class DefaultEnv:
     def compute_body_torques(self) -> np.ndarray:
         # PD control: tau = tau_ff + kp * (q_des - q) + kd * (dq_des - dq)
         body_torques = np.zeros(self.num_body_dof)
-        if self.unitree_bridge is not None and self.unitree_bridge.low_cmd:
-            for i in range(self.unitree_bridge.num_body_motor):
-                if self.unitree_bridge.use_sensor:
-                    body_torques[i] = (
-                        self.unitree_bridge.low_cmd.motor_cmd[i].tau
-                        + self.unitree_bridge.low_cmd.motor_cmd[i].kp
-                        * (self.unitree_bridge.low_cmd.motor_cmd[i].q - self.mj_data.sensordata[i])
-                        + self.unitree_bridge.low_cmd.motor_cmd[i].kd
-                        * (
-                            self.unitree_bridge.low_cmd.motor_cmd[i].dq
-                            - self.mj_data.sensordata[i + self.unitree_bridge.num_body_motor]
-                        )
+        if self.unitree_bridge is None:
+            return body_torques
+        with self.unitree_bridge.low_cmd_lock:
+            if not self.unitree_bridge.low_cmd_received:
+                return body_torques
+            low_cmd = self.unitree_bridge.low_cmd
+        for i in range(self.unitree_bridge.num_body_motor):
+            if self.unitree_bridge.use_sensor:
+                body_torques[i] = (
+                    low_cmd.motor_cmd[i].tau
+                    + low_cmd.motor_cmd[i].kp
+                    * (low_cmd.motor_cmd[i].q - self.mj_data.sensordata[i])
+                    + low_cmd.motor_cmd[i].kd
+                    * (
+                        low_cmd.motor_cmd[i].dq
+                        - self.mj_data.sensordata[i + self.unitree_bridge.num_body_motor]
                     )
-                else:
-                    body_torques[i] = (
-                        self.unitree_bridge.low_cmd.motor_cmd[i].tau
-                        + self.unitree_bridge.low_cmd.motor_cmd[i].kp
-                        * (
-                            self.unitree_bridge.low_cmd.motor_cmd[i].q
-                            - self.mj_data.qpos[self.body_joint_index[i] + self.qpos_offset - 1]
-                        )
-                        + self.unitree_bridge.low_cmd.motor_cmd[i].kd
-                        * (
-                            self.unitree_bridge.low_cmd.motor_cmd[i].dq
-                            - self.mj_data.qvel[self.body_joint_index[i] + self.qvel_offset - 1]
-                        )
-                    )
+                )
+            else:
+                body_torques[i] = (
+                    low_cmd.motor_cmd[i].tau
+                    + low_cmd.motor_cmd[i].kp
+                    * (low_cmd.motor_cmd[i].q - self.mj_data.qpos[self.body_joint_index[i] + self.qpos_offset - 1])
+                    + low_cmd.motor_cmd[i].kd
+                    * (low_cmd.motor_cmd[i].dq - self.mj_data.qvel[self.body_joint_index[i] + self.qvel_offset - 1])
+                )
         return body_torques
 
     def get_head_pose(self) -> np.ndarray:
@@ -300,33 +299,30 @@ class DefaultEnv:
     def compute_hand_torques(self) -> np.ndarray:
         left_hand_torques = np.zeros(self.num_hand_dof)
         right_hand_torques = np.zeros(self.num_hand_dof)
-        if self.unitree_bridge is not None and self.unitree_bridge.low_cmd:
-            for i in range(self.unitree_bridge.num_hand_motor):
+        if self.unitree_bridge is None:
+            return np.concatenate((left_hand_torques, right_hand_torques))
+        with self.unitree_bridge.left_hand_cmd_lock:
+            left_hand_cmd_received = self.unitree_bridge.left_hand_cmd_received
+            left_hand_cmd = self.unitree_bridge.left_hand_cmd
+        with self.unitree_bridge.right_hand_cmd_lock:
+            right_hand_cmd_received = self.unitree_bridge.right_hand_cmd_received
+            right_hand_cmd = self.unitree_bridge.right_hand_cmd
+        for i in range(self.unitree_bridge.num_hand_motor):
+            if left_hand_cmd_received:
                 left_hand_torques[i] = (
-                    self.unitree_bridge.left_hand_cmd.motor_cmd[i].tau
-                    + self.unitree_bridge.left_hand_cmd.motor_cmd[i].kp
-                    * (
-                        self.unitree_bridge.left_hand_cmd.motor_cmd[i].q
-                        - self.mj_data.qpos[self.left_hand_index[i] + self.qpos_offset - 1]
-                    )
-                    + self.unitree_bridge.left_hand_cmd.motor_cmd[i].kd
-                    * (
-                        self.unitree_bridge.left_hand_cmd.motor_cmd[i].dq
-                        - self.mj_data.qvel[self.left_hand_index[i] + self.qvel_offset - 1]
-                    )
+                    left_hand_cmd.motor_cmd[i].tau
+                    + left_hand_cmd.motor_cmd[i].kp
+                    * (left_hand_cmd.motor_cmd[i].q - self.mj_data.qpos[self.left_hand_index[i] + self.qpos_offset - 1])
+                    + left_hand_cmd.motor_cmd[i].kd
+                    * (left_hand_cmd.motor_cmd[i].dq - self.mj_data.qvel[self.left_hand_index[i] + self.qvel_offset - 1])
                 )
+            if right_hand_cmd_received:
                 right_hand_torques[i] = (
-                    self.unitree_bridge.right_hand_cmd.motor_cmd[i].tau
-                    + self.unitree_bridge.right_hand_cmd.motor_cmd[i].kp
-                    * (
-                        self.unitree_bridge.right_hand_cmd.motor_cmd[i].q
-                        - self.mj_data.qpos[self.right_hand_index[i] + self.qpos_offset - 1]
-                    )
-                    + self.unitree_bridge.right_hand_cmd.motor_cmd[i].kd
-                    * (
-                        self.unitree_bridge.right_hand_cmd.motor_cmd[i].dq
-                        - self.mj_data.qvel[self.right_hand_index[i] + self.qvel_offset - 1]
-                    )
+                    right_hand_cmd.motor_cmd[i].tau
+                    + right_hand_cmd.motor_cmd[i].kp
+                    * (right_hand_cmd.motor_cmd[i].q - self.mj_data.qpos[self.right_hand_index[i] + self.qpos_offset - 1])
+                    + right_hand_cmd.motor_cmd[i].kd
+                    * (right_hand_cmd.motor_cmd[i].dq - self.mj_data.qvel[self.right_hand_index[i] + self.qvel_offset - 1])
                 )
         return np.concatenate((left_hand_torques, right_hand_torques))
 
