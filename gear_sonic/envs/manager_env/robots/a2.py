@@ -142,7 +142,15 @@ A2_ISAACLAB_TO_MUJOCO_BODY = [
     72,
 ]
 
-A2_MUJOCO_TO_ISAACLAB_BODY = A2_ISAACLAB_TO_MUJOCO_BODY
+# For each of the 74 MuJoCo bodies (excl. world), the index in the 53-body Isaac Lab
+# subset. -1 for passive bodies not in the subset (toe linkages, wrist linkages, etc.).
+A2_MUJOCO_TO_ISAACLAB_BODY = [
+     0,  1,  2,  3,  4,  5,  6, -1, -1, -1, -1,  7,  8,  9, 10, 11,
+    12, -1, -1, -1, -1, -1, 13, 14, 15, 16, 17, 18, 19, -1, 20, 21,
+    22, 23, 24, 25, 26, 27, 28, 29, 30, 31, -1, -1, -1, -1, -1, 32,
+    33, 34, 35, 36, 37, 38, -1, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, -1, -1, -1, -1, 51, 52, -1,
+]
 
 # Isaac Lab traverses the URDF in BFS order; MuJoCo uses depth-first XML order.
 # Computed offline via yourdfpy (BFS) + mujoco.MjModel joint enumeration.
