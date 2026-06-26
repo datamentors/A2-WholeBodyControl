@@ -202,6 +202,31 @@ class H2Converter(IsaacLabMuJoCoConverter):
     FOOT_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
 
 
+class A2Converter(IsaacLabMuJoCoConverter):
+    """A2 Ultra joint/body order converter for the direct-toe 52-DOF embodiment."""
+
+    def __init__(self):
+        from gear_sonic.envs.manager_env.robots.a2 import (
+            A2_ISAACLAB_JOINTS,
+            A2_ISAACLAB_TO_MUJOCO_DOF,
+            A2_MUJOCO_TO_ISAACLAB_DOF,
+        )
+
+        self.JOINT_NAMES = A2_ISAACLAB_JOINTS
+        identity_body = list(range(len(self.JOINT_NAMES)))
+        self.DOF_MAPPINGS = {
+            ("isaaclab", "mujoco"): A2_ISAACLAB_TO_MUJOCO_DOF,
+            ("mujoco", "isaaclab"): A2_MUJOCO_TO_ISAACLAB_DOF,
+        }
+        self.BODY_MAPPINGS = {
+            ("isaaclab", "mujoco"): identity_body,
+            ("mujoco", "isaaclab"): identity_body,
+        }
+
+    VR_3POINTS_BODY_NAMES = ["head_link02", "left_arm_link07", "right_arm_link07"]
+    FOOT_BODY_NAMES = ["left_toe_roll", "right_toe_roll"]
+
+
 def load_qpos_from_csv(csv_path: str) -> torch.Tensor:
     """Load qpos [T, D] from CSV."""
     import pandas as pd

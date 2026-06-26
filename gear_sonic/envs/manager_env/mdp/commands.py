@@ -3387,17 +3387,15 @@ class TrackingCommand(CommandTerm):
         self.goal_pos_visualizer.visualize(self.body_pos_w.view(-1, 3))
 
         if hasattr(self, "feet_contact_goal_visualizers"):
-            for i in range(len(self.cfg.body_names)):
-                if self.cfg.body_names[i] == "left_ankle_roll_link":
-                    self.feet_contact_goal_visualizers[0].visualize(
-                        translations=self.body_pos_relative_w[:, i],
-                        marker_indices=self.feet_l.int().reshape(-1),
-                    )
-                if self.cfg.body_names[i] == "right_ankle_roll_link":
-                    self.feet_contact_goal_visualizers[1].visualize(
-                        translations=self.body_pos_relative_w[:, i],
-                        marker_indices=self.feet_r.int().reshape(-1),
-                    )
+            for vis_idx, foot_name in enumerate(self.cfg.feet_body_names[:2]):
+                if foot_name not in self.cfg.body_names:
+                    continue
+                body_idx = self.cfg.body_names.index(foot_name)
+                contact = self.feet_l if vis_idx == 0 else self.feet_r
+                self.feet_contact_goal_visualizers[vis_idx].visualize(
+                    translations=self.body_pos_relative_w[:, body_idx],
+                    marker_indices=contact.int().reshape(-1),
+                )
 
         if self.cfg.use_height_map:
             self.height_map_visualizer.visualize(
